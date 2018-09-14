@@ -1,0 +1,1199 @@
+---
+title: Modeling Traffic Congestion and an Examination of the Factors Influencing
+  Congestion and Public Transit Ridership in the City of Chicago
+author: Andrew Hile, Elliot Chibe, Linxi Li, Max Oellien, Calin Segarceanu, Christopher
+  Ver Hoef
+date: "April 28, 2018"
+output: 
+  pdf_document: 
+    fig_caption: yes
+    includes:
+      in_header: fix-fig-pos.tex
+---
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H')
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(caret)
+library(ggpubr)
+library(gridExtra)
+library(reshape2)
+library(rgdal)
+library(rgeos)
+library(sp)
+library(tidyverse)
+
+load("~/Downloads/csp571.RData")
+l_norm_top10 <- as.character(l_norm_top10)
+l_total_top10 <- as.character(l_total_top10)
+bus_norm_top10 <- as.character(bus_norm_top10)
+bus_total_top10 <- as.character(bus_total_top10)
+taxi_norm_dropoffs_top10 <- as.character(taxi_norm_dropoffs_top10)
+taxi_norm_pickups_top10 <- as.character(taxi_norm_pickups_top10)
+taxi_avg_ride_len_top10 <- as.character(taxi_avg_ride_len_top10)
+traffic_speed_top10 <- as.character(traffic_speed_top10)
+```
+
+# Abstract
+
+One of the objectives of this study was to explore the factors driving Chicago public transportation ridership (specifically taxi, CTA bus, and 'L') via qualitative analysis of each reponse with respect to meterorological, demographic, and temporal factors. We found ridership distribution modality to be governed primarily by day of week and Census community area, with distribution variance driven by time-related factors with some influence by temperature. Based on census community survey data, median income and age were found to influence transportation mode preference. These conclusions need validation using a second location with a similarly robust public transit system and [ideally] more reliable traffic data collection; New York City has potential, and also has published ridesharing data that could be incorporated into the analysis (unavailable in Chicago). In addition, exploring the impact of bike sharing on public transit offers another possible avenue of investigation.
+
+Another objective was to prototype several predictive models for regional traffic congestion at a given time and location using one month's worth of measurements. Three models were tested: simple linear regression, linear regression including higher-order interaction effects, and kNN regression. kNN regression offered the best fit quality, which was sustained in out-of-sample validation. All three models tended to be more precise during high-congestion periods and overestimate during low-congestion periods, but the latter was not an issue due to the target response being relative, not absolute. Due to the traffic data availability limitations, further investigation could be conducted on a manually scraped dataset accumulated over the course of a year so that weather and temporal affects could be accounted for. In addition, this investigation was performed at the region level (groups of community areas); data is available to scrape at the segment level (stretches of major roads) provides higher location resolution.
+
+# Introduction
+Transportation ridership and interaction offers a multifaceted investigation opportunity. While planning this study, our inital assumption was that time, location, demographics and weather would be the primary factors affecting traffic congestion and public transit ridership. Chicago was a prime candidate for analysis as a major city with two robust and established modes of public transit: CTA 'L' and bus. Our motivation was to qualify how our anticipated factors affect each mode and attempt to apply any patterns observed in a predictive model for traffic congestion. 
+
+\newpage
+## Conventions
+There are several terms that are used repeatedly in this report:
+
+* Community areas: Refers to the 77 census community areas in Chicago (Figure 1)
+* Traffic regions: Refers to the 29 traffic regions in Chicago (Figure 1), 
+* Speed: Estimated congestion level recorded in miles per hour (not absolute), recorded using CTA bus GPA traces
+* Day type: as defined by the CTA, W = weekday, A = Saturday, U = Sunday/Holiday
+* Normalized ridership: The total ride count was normalized with respect to the number of stops in a given community area
+* [Response] per capita: The response was normalized to the 2010 census population of a given community area
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Community areas (left) and an overlay of traffic regions on community areas (right)", fig.pos="h"}
+fig1a <- ggplot(census, aes(map_id = area_id)) +
+  geom_map(fill = "light grey", color = "grey", map = areas_map_ggplot) +
+  geom_text(aes(label = area_id, x = longitude, y = latitude), size = 1.5) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+fig1b <- ggplot(census, aes(map_id = area_id)) +
+  geom_map(fill = "light grey", color = "grey", map = areas_map_ggplot) +
+  geom_map(alpha = 0, color = "black", map = traffic_map_ggplot) + 
+  geom_text(aes(label = area_id, x = longitude, y = latitude), size = 1.5) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+ggarrange(fig1a, fig1b, ncol = 2)
+```
+
+## Methodology
+
+### Pre-processing
+With the exception of pre-processing the taxi dataset, all operations were performed using R/RStudio. General table manipulation and joining was performed via the *tidyverse* package set and all plots were generated using the *ggplot2* package. The *reshape2* package utilized for preparing some tables for meaningful plotting. 
+
+The primary obstacle barring analysis of predictors was the location convention in each dataset: the bus data used routes, 'L' used stations, and traffic used custom regions. The *rgdal*, *rgeos*, and *sp* packages proved essential for associating bus and 'L' stations with a community area (Figure 2). However, given that the bus ridership counts were recorded by route, we decided to normalize with respect to the proportion of each route that was in a given community area (e.g. if a route with two stations in area A, three in area B and four in area C had 10 rides on a given day, the normalized ridership assigned to each area was 2, 3, and 4 respectively). The 'L' ridership was normalized simply by dividing by the total number of stations in a given community area. 'L', bus, and taxi data was normalized further to obtain responses per capita by dividing by the associated 2010 census area population.
+
+The custom regions in the traffic dataset were combinations of community areas with similar traffic patterns (e.g. if areas A, C, and G had similar traffic patterns, the region name would roughly be 'A-C-G'). However, the names of these regions often did not exactly match the names of the encompassed areas or omitted some areas altogether. We audited the names of each of the regions and manually created a translation table that would allow other tables to be joined.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Overlays of 'L' (left) and bus (right) stations on community areas"}
+fig2a <- ggplot(census, aes(map_id = area_id)) +
+  geom_map(fill = "light grey", color = "grey", map = areas_map_ggplot) +
+  geom_point(data = l_map@data, aes(x = long, y = lat), size = 0.001) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+fig2b <- ggplot(census, aes(map_id = area_id)) +
+  geom_map(fill = "light grey", color = "grey", map = areas_map_ggplot) +
+  geom_point(data = bus_map@data, aes(x = point_x, y = point_y), size = 0.001) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+grid.arrange(fig2a, fig2b, ncol = 2)
+```
+
+Time granularity proved to be a second issue; the public transit ridership was recorded on a daily basis, while traffic congestion was captured every 10 minutes. Additionally, while the time range of the traffic data was initially assumed to be 01/01/2013 - 01/31/2015, we later found that the timestamp was only recorded properly from 01/01/2015 - 01/31/2015. Outside of this timeframe, all observations for a given day had the latest measurement timestamp (e.g. 11:50 PM) and observation chronology was not maintained via row order, resulting in one month of valid data for a predictive model. To counter this, we aggregated the entire timeframe at the day-level to obtain the peak congestion level in each community area, which also aligned the time granularity with the public transit data.
+
+### Pre-processing: taxi
+Due to the large size of the raw taxi dataset (113M rows, 23 columns), aggregation became necessary. We performed three aggregations: total number of rides by pickup community area per day, total number of rides by destination community area per day, and the average ride length by destination community area per day. We initially planned to use SQL and its tools for the aggregations. However, due to the size of the dataset and, perhaps, the age of the computer doing the calculating, this proved to be infeasible; after more than twenty-four hours, the aggregation command had not completed. Since we had the data stored in a csv file, we improvised; a Java program was written from scratch to read the csv file, perform the required aggregations, and write the results out into another csv file. Although it required more work, this proved to be much faster. The much smaller table was then imported to SQL so that we could add the columns necessary for joining with other datasets. Rows that were missing values for pickup area, dropoff area, or ride length were discarded during aggregation.
+
+### Predictive modeling
+We explored three different predictive models: linear regression, linear regression including second and third-order interaction terms, and $k$-Nearest Neighbors (kNN) regression. Both linear regression models utilized the *stats* package, kNN regression required the *caret* package. The model data was partitioned (again using the *caret* package) such that 80% of observations were used for training and 20% for test. Given the narrow timeframe (one month) of the model data, we created a separate validation set by scraping the current congestion readings using the *rjson* package 04/10/2018 - 04/22/2018.
+
+### Analysis limitations
+* Ridesharing data and Metra ridership data have not been made available for the city of Chicago, so we were unable to examine those factors.
+* Of all the temporal datasets, traffic had the limiting timeframe due to limited data availability, so we narrowed the scope of this investigation to that timeframe.
+* We normalized public transit ridership data using the 2010 census population counts by assuming that the 2010 census results were representative of the 2013-2015 timeframe.
+* Each traffic region is implicitly a mean aggregation of the encompassed traffic segments.
+* Normalizing traffic congestion in each region by the number of intersections, total road length, or other potentially meaningful geographical factors would likely have provided a more accurate representation of relative congestion, but was out of the scope of this investigation. For 'L' and bus ridership, normalizing by vehicle volume and timetable variation was similarly out of scope.
+* There are several timeframes where certain 'L' stations recorded zero ridership. The most significant event was the Red Line South Reconstruction Project, which took place from May-October 2013 and closed nine stations. The majority of other zero-ridership events affected 1-2 stations. All of these events were excluded from the analysis.
+* Below a certain threshold of bus and GPS trace volume, traffic speed would be reported as '0', inferring that the entire region was gridlocked. Given that these values appeared during each hour of the day, we concluded that these values were not valid and excluded them.
+* The data source used for the validation set did not report bus count and number of reads, but still contained reported speeds of '0'; these were filtered out.
+
+\newpage
+# Exploring public transit ridership
+Note: Most of the plots in this section have been filtered down to the top 10 community areas for the associated response (e.g. the areas with the highest ridership) to improve visual clarity. In addition, community areas affected by the Red Line South Reconstruction Project in 2013 (resulting in drastically inflated ridership) were filtered out from 'L' ridership plots.
+
+## Demographics
+Relevant responses sourced from the U.S. census and community surveys included average vehicle miles driven per household and the population proportion of commuters' preferred mode of transportation. Analyzing these responses with respect to median age and median income of a given community area showed that the commute mode preference is strongly impacted by both age and income (Figures 3, 4). High-income communities tend to drive alone far more than low-income communities, while low-income communities tend to utilize other modes far more than high-income communities. Walking/biking exhibits this behavior the weakest out of all the modes, and is instead more influenced by age. Communities with younger and older populations showed some of the same trends exhibited by low-income and high-income areas respectively, but also showed a distinct preference transition starting at a median age of ~35.
+
+## CTA bus and 'L' distributions
+As expected, weekday public transit ridership is significantly higher than either weekend day type. The bias between community areas remains fairly stable across day types with some exceptions. For instance, Fuller Park had the second-highest bus ridership during the week, but drops off to fourth-highest over the weekend (Figure 5). Accordingly, for each transportation mode, the spatial ridership densities of both normalization schemes are drastically different (Figures 6, 7), with ridership per capita likely reflecting population-driven factors. O'hare 'L' ridership per capita is likely influenced by airport traffic on the blue line, which is not captured in the demographics discussion.
+
+We also used the 'L' and bus ridership data in an attempt to validate the public transit trends with respect to demographics discussed above. However, the bus ridership with respect to median income was the only relationship supported by the transit data (Figure 8). We suspect that our spatial normalization approach and limitations masked these relationships to an extent.
+
+\newpage
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Proportion of community area population preferring a given transporation mode with respect to median income (left) and age (right)", fig.pos="h"}
+fig2a <- ggplot(census_plot,
+                aes(x = med_inc, y = value, color = variable)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, se = FALSE) +
+  theme_bw() + 
+  labs(x = "Median income",
+       y = "Proportion of ommunity area population",
+       color = "Transportation Mode") +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8))
+fig2b <- ggplot(census_plot,
+                aes(x = med_age, y = value, color = variable)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, se = FALSE) +
+  theme_bw() + 
+  labs(x = "Median age",
+       y = "Proportion of ommunity area population",
+       color = "Transportation Mode") +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8))
+ggarrange(fig2a, fig2b, ncol = 2, common.legend = TRUE, legend = "bottom")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Average annual vehicle miles traveled with respect to median income (left) and age (right)", fig.pos="h"}
+fig8a <- ggplot(census,
+                aes(x = med_inc, y = avg_vmt)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, se = FALSE) +
+  theme_bw() + 
+  labs(x = "Median income",
+       y = "Average annual vehicle miles traveled") +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8))
+fig8b <- ggplot(census,
+                aes(x = med_age, y = avg_vmt)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, se = FALSE) +
+  theme_bw() + 
+  labs(x = "Median age",
+       y = "Average annual vehicle miles traveled") +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8))
+ggarrange(fig8a, fig8b, ncol = 2)
+```
+
+\newpage
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=8, fig.cap="Medians of CTA bus (top) and 'L' (bottom) normalized ridership (left) and normalized ridership per capita (right) for community areas with highest ridership", fig.pos="h"}
+fig3a <- ggplot(transit %>%
+                  filter(area_name %in% bus_total_top10) %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(bus_norm_rides),
+                            med_total = median(bus_total_rides)),
+                aes(x = reorder(area_name, -med_total),
+                    y = med_total / 1000, fill = day_type)) +
+  geom_col() +
+  theme_bw() + 
+  labs(x = "Community area",
+       y = "Median(normalized bus ridership)/1,000",
+       fill = "Day type") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 4),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig3b <- ggplot(transit %>%
+                  filter(area_name %in% bus_norm_top10) %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(bus_norm_rides),
+                            med_total = median(bus_total_rides)),
+                aes(x = reorder(area_name, -med_norm),
+                    y = med_norm, fill = day_type)) +
+  geom_col() +
+  theme_bw() + 
+  labs(x = "Community area",
+       y = "Median(normalized bus ridership per capita)",
+       fill = "Day type") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 4),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig3c <- ggplot(transit %>%
+                  filter(area_name %in% l_norm_top10) %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(l_norm_rides),
+                            med_total = median(l_total_rides)),
+                aes(x = reorder(area_name, -med_total),
+                    y = med_total / 1000, fill = day_type)) +
+  geom_col() +
+  theme_bw() + 
+  labs(x = "Community area",
+       y = "Median(normalized 'L' ridership per capita)/1,000",
+       fill = "Day type") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 4),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig3d <- ggplot(transit %>%
+                  filter(area_name %in% l_norm_top10) %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(l_norm_rides),
+                            med_total = median(l_total_rides)),
+                aes(x = reorder(area_name, -med_norm),
+                    y = med_norm, fill = day_type)) +
+  geom_col() +
+  theme_bw() + 
+  labs(x = "Community area",
+       y = "Median(normalized bus ridership per capita)",
+       fill = "Day type") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 4),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+ggarrange(fig3a, fig3b, fig3c, fig3d, ncol = 2, nrow = 2, common.legend = TRUE, legend = "bottom")
+```
+
+\newpage
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Spatial density of medians of normalized CTA bus ridership (top) and normalized ridership per capita (bottom)", fig.pos="h"}
+fig3a <- ggplot(transit %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(bus_norm_rides),
+                            med_total = median(bus_total_rides) / 1000),
+                aes(map_id = area_id)) +
+  geom_map(aes(fill = med_total), color = "grey", map = areas_map_ggplot) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  scale_fill_gradient(high = "dark green", low = "light green", guide = "colorbar") +
+  theme_bw() +
+  labs(fill = "Median(normalized bus\nridership)/1000") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+fig3b <- ggplot(transit %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(bus_norm_rides),
+                            med_total = median(bus_total_rides)),
+                aes(map_id = area_id)) +
+  geom_map(aes(fill = med_norm), color = "grey", map = areas_map_ggplot) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  scale_fill_gradient(high = "dark green", low = "light green", guide = "colorbar") +
+  theme_bw() +
+  labs(fill = "Median(normalized bus\nridership per capita)") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+ggarrange(fig3a, fig3b, nrow = 2)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Spatial density of medians of normalized CTA 'L' ridership (top) and normalized ridership per capita (bottom)", fig.pos="h"}
+fig3a <- ggplot(transit %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(l_norm_rides),
+                            med_total = median(l_total_rides) / 1000),
+                aes(map_id = area_id)) +
+  geom_map(aes(fill = med_total), color = "grey", map = areas_map_ggplot) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  scale_fill_gradient(high = "dark blue", low = "light blue", guide = "colorbar") +
+  theme_bw() +
+  labs(fill = "Median(normalized 'L'\nridership)/1000") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+fig3b <- ggplot(transit %>%
+                  group_by(area_name, area_id, day_type) %>%
+                  summarize(med_norm = median(l_norm_rides),
+                            med_total = median(l_total_rides) / 1000),
+                aes(map_id = area_id)) +
+  geom_map(aes(fill = med_norm), color = "grey", map = areas_map_ggplot) +
+  expand_limits(x = areas_map_ggplot$long, y = areas_map_ggplot$lat) +
+  coord_quickmap() +
+  scale_fill_gradient(high = "dark blue", low = "light blue", guide = "colorbar") +
+  theme_bw() +
+  labs(fill = "Median(normalized 'L'\nridership per capita)") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+ggarrange(fig3a, fig3b, nrow = 2)
+```
+
+\newpage
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=3.5, fig.cap="Distributions of bus ridership per capita by community area ordered by median income", fig.pos="h"}
+ggplot(transit %>%
+         left_join(census, by = c("area_name", "area_id")),
+       aes(x = reorder(area_name, med_inc),
+           y = bus_norm_rides,
+           color = med_inc/1000)) +
+  geom_boxplot(outlier.size = 0) +
+  theme_bw() + 
+  labs(x = "Community area",
+       y = "Normalized bus ridership per capita",
+       color = "Median income/1,000") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 4),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+```
+
+## Public transit periodicity: time and weather
+We examined time in parallel with daily peak temperature in order to decouple the effects of time-related factors and weather on public transit ridership. With respect to time, two patterns were observed while examining bus and 'L' ridership (Figure 9):
+
+* Periodic (sinusoidal) behavior over the course of a year shown primarily on Saturdays/Sundays. Some community areas exhibit this behavior during during the week as well.
+* Periodic behavior over the course of a year exhibited by some community areas during weekdays. A rough outline of this behavior:
+    + Jan - Jun: Flat
+    + Jun - Aug: Step function down
+    + Aug - Nov: Step function up, potentially beyond initial baseline
+    + Nov - Dec: Steep decline
+    
+With respect to temperature, ridership of both modes tended to increase slightly or remain flat as temperature rose; this relationship was consistent across all day types and community areas, aligning with the first time-related behavior listed above. The presence of two different periodic time trends implies that there is a seasonal factor driving weekday ridership (e.g. academic breaks, seasonal vacations).
+
+## Taxi distributions
+For the two-year timeframe that was in-scope, neither taxi pickups nor dropoffs showed similar time or weather-driven patterns to the public transit responses (Figure 10). The distribution modality is still heavily governed by the day type and community area, but the primary distribution variation drivers remain elusive; 2013 and 2014 exhibited completely different ridership trends. Average ride length, however, appears independent of ridership; the distribution is best characterized by high outliers, which occur more often during weekdays, but steadily decreased in frequency through 2013-2014 (Figure 11).
+
+\newpage
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=9, fig.width=7, fig.cap="Comparison of 'L' (top row) and bus (bottom row) ridership with respect to time (left column) and maximum daily temperature (right column)", fig.pos="h"}
+fig3a <- ggplot(transit %>%
+                  filter(area_name %in% l_norm_top10),
+                aes(x = date, y = l_norm_rides, color = area_name)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+  facet_wrap(~ day_type) +
+  theme_bw() +
+  labs(x = "Date",
+       y = "Normalized 'L' ridership (rides per capita)",
+       color = "Community area") +
+  guides(color = guide_legend(ncol = 7)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig3b <- ggplot(transit %>%
+                  filter(area_name %in% l_norm_top10),
+                aes(x = tmax,
+                    y = l_norm_rides,
+                    color = area_name)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+  facet_wrap(~ day_type) +
+  theme_bw() +
+  labs(x = "Daily maximum temperature (°F)",
+       y = "Normalized 'L' ridership (rides per capita)",
+       color = "Community area") +
+  guides(color = guide_legend(ncol = 7)) +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig3c <- ggplot(transit %>%
+                 filter(area_name %in% bus_norm_top10),
+               aes(x = date,
+                   y = bus_norm_rides,
+                   color = area_name)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+  facet_wrap(~ day_type) +
+  theme_bw() +
+  labs(x = "Date",
+       y = "Normalized bus ridership",
+       color = "Community Area") +
+  guides(color = guide_legend(ncol = 7)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig3d <- ggplot(transit %>%
+                  filter(area_name %in% bus_norm_top10),
+                aes(x = tmax,
+                    y = bus_norm_rides,
+                    color = area_name)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+  facet_wrap(~ day_type) +
+  theme_bw() +
+  labs(x = "Daily maximum temperature (°F)",
+       y = "Normalized bus ridership (rides per capita)",
+       color = "Community area") +
+  guides(color = guide_legend(ncol = 7)) +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+grid.arrange(ggarrange(fig3a, fig3b, common.legend = TRUE, legend = "bottom"), ggarrange(fig3c, fig3d, common.legend = TRUE, legend = "bottom"), nrow = 2)
+```
+
+\newpage
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Taxi pickups with respect to time (left) and maximum daily temperature (right)", fig.pos="h"}
+fig4a <- ggplot(transit %>%
+                  filter(area_name %in% taxi_norm_pickups_top10),
+                aes(x = date, y = taxi_norm_pickups, color = area_name)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+  facet_wrap(~ day_type) +
+  theme_bw() +
+  labs(x = "Date",
+       y = "Taxi pickups per capita",
+       color = "Community area") +
+  guides(color = guide_legend(ncol = 7)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig4b <- ggplot(transit %>%
+           filter(area_name %in% taxi_norm_pickups_top10),
+       aes(x = tmax,
+           y = taxi_norm_pickups,
+           color = area_name)) +
+    geom_point(size = 0.01) +
+    geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+    facet_wrap(~ day_type) +
+    theme_bw() +
+    labs(x = "Daily maximum temperature (°F)",
+         y = "Taxi pickups per capita",
+         color = "Community area") +
+    guides(color = guide_legend(ncol = 7)) +
+    theme(axis.text.x = element_text(size = 6),
+          axis.text.y = element_text(size = 6),
+          axis.title.x = element_text(size = 8),
+          axis.title.y = element_text(size = 8),
+          legend.key.size = unit(10, "points"),
+          legend.position = "bottom",
+          legend.text = element_text(size = 6),
+          legend.title = element_text(size = 8),
+          strip.text = element_text(size = 8))
+ggarrange(fig4a, fig4b, common.legend = TRUE, legend = "bottom", ncol = 2)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.cap="Taxi dropoffs (left) and average ride length (right) over time", fig.pos="h"}
+fig4c <- ggplot(transit %>%
+                  filter(area_name %in% taxi_norm_dropoffs_top10),
+                aes(x = date, y = taxi_norm_dropoffs, color = area_name)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+  facet_wrap(~ day_type) +
+  theme_bw() +
+  labs(x = "Date",
+       y = "Taxi dropoffs per capita",
+       color = "Community area") +
+  guides(color = guide_legend(ncol = 2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+fig4d <- ggplot(transit %>%
+                  filter(area_name %in% taxi_avg_ride_len_top10),
+                aes(x = date, y = taxi_avg_ride_len, color = area_name)) +
+  geom_point(size = 0.01) +
+  geom_smooth(size = 0.5, span = 0.4, se = FALSE) + 
+  facet_wrap(~ day_type) +
+  theme_bw() +
+  labs(x = "Date",
+       y = "Average taxi ride length",
+       color = "Community area") +
+  guides(color = guide_legend(ncol = 2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8))
+ggarrange(fig4c, fig4d, ncol = 2)
+```
+
+\newpage
+# Traffic congestion predictive modeling
+## Linear regression
+First, we applied a simple linear regression of traffic speed vs day type, region, and hour. The $R^2$ for the model was 0.5245 with a RMSE of 3.348, and the model deemed each predictor significant (including each factor level for region and day type). When we applied the model to the test set, the resulting RMSE was 3.2830. As linear regression has a relatively low model variance (compared to kNN regression), comparable RMSE values across training and test sets was expected.
+
+## Linear regression including second and third-order interaction effects
+Including the higher-order interaction effects proved to be a marginally better fit compared to the model with first-order terms only: $R^2$ increased by 3.3% to 0.542 and RMSE dropped by 1.8% to 3.288. Applying the model to the test set yielded an RMSE of 3.2248, which is comparable to the RMSE of the training set. If this investigation was constrained to using parametric models only, we would stick with simple linear regression; the benefits of adding the higher-order terms are relatively small and come at a price of increasing the dinmensionality of the model from 31 to 173 degrees of freedom.
+
+## kNN regression
+In preparation for kNN regression, the training data was resampled using 10-fold cross validation (repeated three times). The regression yielded a dramatic improvement over either linear regression model. Compared to simple linear regression, the $R^2$ value of 0.7663 and RMSE of 2.3465 offered 46% and 30% improvements respectively. Surprisingly, the model performed comparably out-of-sample with a test RMSE of 2.2525. As a caveat, the execution time of the training process took several hours on a machine with 16GB of RAM and fairly high-end hardware, so refreshing the model in a production environment would likely be infeasible (though this may be circumvented by optimizing core utilization).
+
+## Model selection and validation
+
+----------------------------------------------------------------------------
+               Model                Training   Training   Test   Validation
+                                    $R^2$      RMSE       RMSE   RMSE
+---------------------------------- ---------- ---------- ------ ------------
+Linear regression                  0.5245     3.348      3.2830
+
+Linear regression with interaction 0.542      3.288      3.2248
+effects
+
+kNN regression                     0.7663     2.3465     2.2525 2.2129
+----------------------------------------------------------------------------
+
+Table: Comparison of model quality metrics
+
+Based on the quality of each model, we applied kNN regression to the validation set. The resulting RMSE of 2.2129 was better than the RMSE of the test set; we initally expected that the validation RMSE would be worse given that we were unable to account for additional time-based factors (refer to the traffic-weather analysis). However, we expect that validation RMSE would be worse if the validation set encompassed a larger timeframe (e.g. January - August).
+
+All three regressions showed similar behavior with respect to residuals (Figures 12, 13):
+* Model precision was better at lower speed/heavier congestion values; prediction variation increased above actual speeds of ~20mph.
+* Model accuracy was better at lower speeds; predictions tended to be underestimates above actual speeds of ~30mph.
+* Weekend observations exhibited these effects to a much lower degree.
+
+\newpage
+```{r echo=FALSE, fig.height=9, fig.cap="Test residuals of the simple linear regression model (top) and linear regression model including higher-order interaction effects (bottom)", fig.pos="h"}
+fig6a <- ggplot(traffic_test, aes(x = speed, y = pred_slr)) +
+  geom_point(aes(color = region_name), alpha = 0.2) +
+  geom_abline(slope = 1, intercept = 0, color = "black") +
+  labs(x = "Actual speed (mph)", y = "[Test] Predicted speed (mph)", color = "Traffic region") +
+  theme_bw() +
+  guides(color = guide_legend(ncol = 3)) +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+fig6b <- ggplot(traffic_test, aes(x = speed, y = pred_slr_int)) +
+  geom_point(aes(color = region_name), alpha = 0.2) +
+  geom_abline(slope = 1, intercept = 0, color = "black") +
+  labs(x = "Actual speed (mph)", y = "[Test] Predicted speed (mph)", color = "Traffic region") +
+  theme_bw() +
+  guides(color = guide_legend(ncol = 3)) +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+ggarrange(fig6a, fig6b, nrow = 2, common.legend = TRUE, legend = "bottom")
+```
+
+\newpage
+```{r echo=FALSE, fig.height=9, fig.cap="Residuals of the kNN regression model applied to the test (top) and validation (bottom) sets", fig.pos="h"}
+fig7a <- ggplot(traffic_test, aes(x = speed, y = pred_knn)) +
+  geom_point(aes(color = region_name), alpha = 0.2) +
+  geom_abline(slope = 1, intercept = 0, color = "black") +
+  labs(x = "Actual speed (mph)", y = "[Test] Predicted speed (mph)", color = "Traffic region") +
+  theme_bw() +
+  guides(color = guide_legend(ncol = 3)) +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+fig7b <- ggplot(traffic_valid, aes(x = speed, y = pred_knn)) +
+  geom_point(aes(color = region_name), alpha = 0.2) +
+  geom_abline(slope = 1, intercept = 0, color = "black") +
+  labs(x = "Actual speed (mph)", y = "[Validation] Predicted speed (mph)", color = "Traffic region") +
+  theme_bw() +
+  guides(color = guide_legend(ncol = 3)) +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8),
+        legend.key.size = unit(10, "points"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ day_type)
+ggarrange(fig7a, fig7b, nrow = 2, common.legend = TRUE, legend = "bottom")
+```
+
+\newpage
+# Conclusions
+The investigation of the factors driving public transit ridership was somewhat conclusive; all three modes showed distinct distribution modality by day of week and community area, but we were unable to drill down to the factors defining the biases between the area distributions. Demographic aspects, while inferring behavioral trends within the scope of the census surveys, did not translate to public transit ridership for the most part. Weather and time-related patterns were observed within the 'L' and bus ridership data, but taxi ridership did not show similar patterns and seemed to be responding to an unknown factor.
+
+We successfully prototyped a predicitve model for traffic congestion at a given time and location using both parametric and non-parametric models. kNN regression provided the best fit in-sample and out-of-sample, and was likely successful due to working in a low-dimensional feature space where each feature is bounded. However, the region-level resolution is too small for practical application; a higher-resolution location parameter is necessary. As previously stated, congestion data at the segment-level is available, but this would likely prove to be too granualar and would require aggregation to a lower resolution. The other limiting factor of the training process, data availability, could be overcome by long-term scraping of the current traffic conditions (Chicago no longer maintains a historical dataset). This would enable the model to account for weather and time-related factors that cannot be included currently.
+
+This investigation did not explore the factors influencing ride and bike sharing. Unfortunately, ride sharing data is not available in Chicago, but Divvy, Chicago's bike share program, has released usage data that could be incorporated in the future. However, ride sharing data is available for New York City, which is a good candidate for validation of the findings in this study due to having analogs to the Chicago 'L' and bus systems. 
+
+\newpage
+# References
+## Data sources
+1. Chicago Metropolitan Agency for Planning, "Community Data Snapshots Raw Data, June 2017 Release," *CMAP Data Hub*, 27-Aug-2015. [Online]. Available: <https://datahub.cmap.illinois.gov/dataset/community-data-snapshots-raw-data>. [Accessed: 01-Mar-2018].
+2. City of Chicago, "Boundaries - Community Areas (current)," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Facilities-Geographic-Boundaries/Boundaries-Community-Areas-
+    current-/cauq-8yn6>. [Accessed: 01-Mar-2018].
+3. City of Chicago, "CTA - Bus Stops - Shapefile," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Transportation/CTA-Bus-Stops-Shapefile/pxug-u72f>. [Accessed: 01-Mar-2018].
+4. City of Chicago, "CTA - System Information - List of 'L' Stops," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Transportation/CTA-System-Information-List-of-L-Stops/8pix-ypme>. [Accessed: 01-Mar-2018].
+5. City of Chicago, "Taxi Trips," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Transportation/Taxi-Trips/wrvz-psew>. [Accessed: 01-Mar-2018].
+6. City of Chicago, "CTA - Ridership - 'L' Station Entries - Daily Totals," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Transportation/CTA-Ridership-L-Station-Entries-Daily-
+    Totals/5neh-572f>. [Accessed: 01-Mar-2018].
+7. City of Chicago, "Chicago Traffic Tracker - Historical Congestion Estimates by Region," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Transportation/Chicago-Traffic-Tracker-
+    Historical-Congestion-Esti/emtn-qqdi>. [Accessed: 01-Mar-2018].
+8. City of Chicago, "Chicago Traffic Tracker - Congestion Estimates by Regions," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Transportation/Chicago-Traffic-Tracker-Congestion-
+    Estimates-by-Re/t2qc-9pjd/data>. [Accessed: 01-Mar-2018].
+9. City of Chicago, "CTA - Ridership - Bus Routes - Daily Totals by Route," *Chicago Data Portal*. [Online]. Available: <https://data.cityofchicago.org/Transportation/CTA-Ridership-Bus-Routes-Daily-Totals-by-
+    Route/jyb9-n7fm>. [Accessed: 01-Mar-2018].
+10. National Centers for Environmental Information, "Climate Data Online," *Climate Data Online*. [Online]. Available: <https://www.ncdc.noaa.gov/cdo-web/>. [Accessed: 01-Mar-2018].
+
+## Bibliography
+1. Chicago Transit Authority, "CTA Red Line South Reconstruction Project," *Chicago Transit Authority*. [Online]. Available: <https://www.transitchicago.com/redsouth>. [Accessed: 01-Mar-2018].
+2. C. E. Nuno, "Mapping Public Transportation in the City of Chicago," *RPubs*, 19-Aug-2017. [Online]. Available: <https://rpubs.com/cenuno/Mapping_CTA>. [Accessed: 01-Mar-2018].
+3. T. W. Schneider, "Analyzing 1.1 Billion NYC Taxi and Uber Trips, with a Vengeance," *Todd W. Schneider*, 17-Nov-2015. [Online]. Available: <http://toddwschneider.com/posts/analyzing-1-1-billion-nyc-taxi-and-uber-trips-with-a-vengeance>. [Accessed: 28-Apr-2018].
+4. H. Wickham, "The tidyverse style guide," *Tidyverse*. [Online]. Available: <http://style.tidyverse.org/>. [Accessed: 01-Mar-2018].
+5. H. Wickham and G. Grolemund, *R for Data Science: Import, Tidy, Transform, Visualize and Model Data*, 1st ed. Sebastopol: OReilly, 2017.
+
+\newpage
+# Appendix: Source code
+```{r eval=FALSE}
+library(caret)
+library(maptools)
+library(reshape2)
+library(rgeos)
+library(sp)
+library(rgdal)
+library(tidyverse)
+
+setwd("~/Downloads")
+
+# Pre-processing: Community areas
+areas_map <-
+  readOGR(paste0("Boundaries - Community Areas (current)/",
+                 "geo_export_068a54b3-748c-4231-bc70-c54dab4b567e.shp"))
+areas_map@data <-
+  areas_map@data %>%
+  rename(area_name = community,
+         area_id = area_numbe)
+areas_map_ggplot <- fortify(areas_map, region = "area_id")
+
+# Pre-processing: Traffic region map
+traffic_map <-
+  read.csv("Chicago_Traffic_Tracker_-_Congestion_Estimates_by_Regions.csv",
+           sep = ",", header = TRUE)
+for(i in 1:29){
+  traffic_map$polygonMatrix[i] <-
+    list(Polygons(list(Polygon(matrix(c(traffic_map$WEST[i],
+                                        traffic_map$SOUTH[i],
+                                        traffic_map$WEST[i],
+                                        traffic_map$NORTH[i],
+                                        traffic_map$EAST[i],
+                                        traffic_map$NORTH[i],
+                                        traffic_map$EAST[i],
+                                        traffic_map$SOUTH[i],
+                                        traffic_map$WEST[i],
+                                        traffic_map$SOUTH[i]),
+                                      ncol = 2, byrow = TRUE))),
+                  ID = traffic_map$REGION[i]))
+}
+traffic_map <-
+  SpatialPolygonsDataFrame(SpatialPolygons(traffic_map$polygonMatrix),
+                           data.frame(region_name = traffic_map$REGION,
+                                      region_id = traffic_map$REGION_ID,
+                                      row.names = traffic_map$REGION))
+proj4string(traffic_map) <- proj4string(areas_map)
+traffic_map_ggplot <- fortify(traffic_map, region = "region_id")
+```
+
+\newpage
+```{r eval=FALSE}
+# Pre-processing: Weather
+weather <-
+  read.csv("weather.csv", sep = ",", header = TRUE) %>%
+  select(DATE, PRCP, TMIN, TMAX) %>%
+  rename(date = DATE, prcp = PRCP, tmin = TMIN, tmax = TMAX)
+weather$date <- as.Date(weather$date, "%Y-%m-%d")
+
+# Pre-processing: Census
+census <-
+  read.csv("ReferenceCCA20112015.csv", sep = ",", header = TRUE) %>%
+  mutate(area_name = str_to_upper(GEOG)) %>%
+  mutate(area_name = ifelse(area_name == "THE LOOP", "LOOP", area_name)) %>%
+  mutate(area_name = ifelse(area_name == "O'HARE", "OHARE", area_name)) %>%
+  mutate(area_name = as.factor(area_name)) %>%
+  mutate(prop_drive_alone = DROVE_AL / TOT_COMM) %>%
+  mutate(prop_carpool = CARPOOL / TOT_COMM) %>%
+  mutate(prop_transit = TRANSIT / TOT_COMM) %>%
+  mutate(prop_walk_bike = WALK_BIKE / TOT_COMM) %>%
+  left_join(areas_map@data, by = "area_name") %>%
+  mutate(area_id = as.factor(area_id)) %>%
+  rename(pop2010 = X2010_POP,
+         med_age = MED_AGE,
+         med_inc = MEDINC,
+         avg_vmt = AVG_VMT) %>%
+  select(area_name, area_id, pop2010, med_age, med_inc, prop_drive_alone,
+         prop_carpool, prop_transit, prop_walk_bike, avg_vmt) %>%
+  left_join(data.frame(id = areas_map@data$area_id,
+                       as.data.frame(coordinates(areas_map)) %>%
+                         rename(longitude = V1, latitude = V2)),
+            by = c("area_id" = "id"))
+census_plot <- melt(census, id.vars = c("area_name", "area_id", "pop2010",
+                                        "med_age", "med_inc", "avg_vmt",
+                                        "longitude", "latitude")) %>%
+    mutate(variable = ifelse(variable == "prop_drive_alone",
+                           "Drive alone",
+                           ifelse(variable == "prop_carpool",
+                                  "Carpool",
+                                  ifelse(variable == "prop_transit",
+                                         "Public transit",
+                                         ifelse(variable == "prop_walk_bike",
+                                                "Walk/bike",
+                                                variable)))))
+```
+
+\newpage
+```{r eval=FALSE}
+# Pre-processing: 'L' station map
+l_map <-
+  read.csv("CTA_-_System_Information_-_List_of__L__Stops_-_Map.csv",
+           sep = ",", header = TRUE) %>%
+  mutate(x = as.numeric(str_remove(sapply(str_split(Location, ", "),
+                                          "[", 1), "\\("))) %>%
+  mutate(y = as.numeric(str_remove(sapply(str_split(Location, ", "),
+                                          "[", 2), "\\)"))) %>%
+  mutate(lat = x) %>%
+  mutate(long = y)
+coordinates(l_map) <- ~ y + x
+proj4string(l_map) <- proj4string(areas_map)
+l_map$area_name <- over(l_map, areas_map)$area_name
+l_map$area_id <- over(l_map, areas_map)$area_id
+l_stops <- l_map@data %>%
+  group_by(MAP_ID, area_name, area_id) %>%
+  summarize()
+
+# Pre-processing: 'L' ridership
+l_rides <-
+  read.csv("CTA_-_Ridership_-__L__Station_Entries_-_Daily_Totals.csv",
+           sep = ",", header = TRUE) %>%
+  mutate(date = as.Date(date, "%m/%d/%Y")) %>%
+  rename(day_type = daytype) %>%
+  filter(rides > 0) %>%
+  left_join(l_stops, by = c("station_id" = "MAP_ID")) %>%
+  group_by(area_name, area_id, date, day_type) %>%
+  summarize(l_total_stops = n(),
+            l_total_rides = sum(rides)) %>%
+  filter(!is.na(area_name)) %>%
+  left_join(census, by = c("area_name", "area_id")) %>%
+  mutate(l_norm_rides = (l_total_rides / l_total_stops) / pop2010) %>%
+  select(area_name, area_id, date, day_type, l_total_rides, l_norm_rides) %>%
+  left_join(data.frame(id = areas_map@data$area_id,
+                       as.data.frame(coordinates(areas_map)) %>%
+                         rename(longitude = V1, latitude = V2)),
+            by = c("area_id" = "id")) 
+
+# Pre-processing: Day type
+day_type_ref <-
+  l_rides[, c("date", "day_type")] %>%
+  group_by(date, day_type) %>%
+  summarize()
+```
+
+\newpage
+```{r eval=FALSE}
+# Pre-processing: Bus station map
+bus_map <-
+  readOGR(paste0("CTA Bus Stops/",
+                 "geo_export_5a152383-5d3d-4786-a4fd-554102086fc5.shp"))
+bus_map@data$area_name <- over(bus_map, areas_map)$area_name
+bus_map@data$area_id <- over(bus_map, areas_map)$area_id
+bus_stops <-
+  over(bus_map, areas_map) %>%
+  mutate(systemstop = bus_map@data$systemstop) %>%
+  mutate(objectid = bus_map@data$objectid) %>%
+  mutate(public_nam = bus_map@data$public_nam) %>% 
+  mutate(routesstpg = bus_map@data$routesstpg) %>%
+  mutate(dir = bus_map@data$dir) %>%
+  mutate(point_x = bus_map@data$point_x) %>%
+  mutate(point_y = bus_map@data$point_y) %>%
+  mutate(route = strsplit(as.character(routesstpg), ",")) %>%
+  unnest(route) %>%
+  mutate(route = as.factor(route)) %>%
+  group_by(area_name, area_id, route) %>%
+  summarize(total_stops = n()) %>%
+  mutate(prop_stops = total_stops / sum(total_stops))
+
+# Pre-processing: Bus ridership
+bus_rides <-
+  read.csv("CTA_-_Ridership_-_Bus_Routes_-_Daily_Totals_by_Route.csv",
+           sep = ",", header = TRUE) %>%
+  mutate(date = as.Date(date, "%m/%d/%Y")) %>%
+  rename(day_type = daytype) %>%
+  # Filter out routes that do not exist at present or that started after 2010
+  filter(!route %in% c("1002", "111A", "115", "122", "123", "127", "129", "137",
+                       "14", "144", "145", "154", "168", "17", "170", "173",
+                       "174", "200", "202", "203", "204", "25", "27", "290",
+                       "290S", "31", "33", "37", "38", "40", "49A", "53AL",
+                       "56A", "64", "69", "69BR", "90N", "95", "992", "999",
+                       "J14", "N201", "R22", "R39", "R55", "R63", "R69", "R79",
+                       "R87", "R95", "X20", "X21", "X28", "X3", "X4", "X49",
+                       "X54", "X55", "X80", "X9", "X99")) %>%
+  left_join(bus_stops, by = "route") %>%
+  mutate(bus_norm_rides = rides * prop_stops) %>%
+  filter(!is.na(area_name)) %>%
+  group_by(date, day_type, area_name, area_id) %>%
+  summarize(bus_total_rides = sum(rides),
+            bus_norm_rides = sum(bus_norm_rides)) %>%
+  left_join(census, by = c("area_name", "area_id")) %>%
+  mutate(bus_norm_rides = bus_norm_rides / pop2010) %>%
+  select(area_name, area_id, date, day_type, bus_total_rides,
+         bus_norm_rides) %>%
+  left_join(data.frame(id = areas_map@data$area_id,
+                      as.data.frame(coordinates(areas_map)) %>%
+                        rename(longitude = V1, latitude = V2)),
+           by = c("area_id" = "id")) 
+```
+
+\newpage
+```{r eval=FALSE}
+# Pre-processing: Taxi dropoffs
+taxi_dropoffs <- read.csv("taxi.csv", sep = ",", header = TRUE) %>%
+  rename(area_id = Dropoff.Community.Area,
+         date = Ride.Date,
+         taxi_avg_ride_len = Average.Ride.Length,
+         taxi_total_dropoffs = Total.Number.of.Rides) %>%
+  mutate(area_id = as.factor(area_id)) %>%
+  mutate(date = as.Date(date, "%m/%d/%y")) %>%
+  left_join(census, by = "area_id") %>%
+  mutate(taxi_norm_dropoffs = taxi_total_dropoffs / pop2010) %>%
+  select(area_name, area_id, date, taxi_total_dropoffs, taxi_norm_dropoffs,
+         taxi_avg_ride_len)
+
+# Pre-processing: Taxi pickups
+taxi_pickups <-
+  read.csv("total-ride-numbers-new.csv", sep = ",", header = TRUE) %>%
+  rename(area_id = Pickup.Community.Area,
+         date = Ride.Date,
+         taxi_total_pickups = Total.Ride.Numbers) %>%
+  mutate(area_id = as.factor(area_id)) %>%
+  mutate(date = as.Date(date, "%Y-%m-%d")) %>%
+  left_join(census, by = "area_id") %>%
+  mutate(taxi_norm_pickups = taxi_total_pickups / pop2010) %>%
+  select(area_name, area_id, date, taxi_total_pickups, taxi_norm_pickups)
+
+# Pre-processing: Traffic congestion
+traffic_areas_join <- read.csv("key-traffic-join.csv", sep = ",", header = TRUE)
+traffic <-
+  read.csv(paste0("Chicago_Traffic_Tracker_-_Historical_Congestion",
+                  "_Estimates_by_Region.csv"),
+           sep = ",", header = TRUE) %>%
+  mutate(time = as.POSIXct(strptime(TIME, "%m/%d/%Y %I:%M:%S %p"))) %>%
+  mutate(date = as.Date(time)) %>%
+  mutate(month = format(date, "%m")) %>%
+  mutate(hour = format(time, "%H")) %>%
+  rename(speed = SPEED,
+         region_id = REGION_ID) %>%
+  left_join(day_type_ref, by = "date") %>%
+  left_join(traffic_map@data, by = "region_id") %>%
+  filter(BUS.COUNT >= 5, NUMBER.OF.READS >= 30)
+```
+
+\newpage
+```{r eval=FALSE}
+# Pre-processing: Aggregate traffic data to peak congestion per day
+traffic_agg <-
+  traffic %>%
+  group_by(region_name, region_id, date, day_type, month) %>%
+  summarize(speed_min = min(speed)) %>%
+  left_join(weather, by = "date")
+traffic_areas <- traffic_agg %>%
+  left_join(traffic_areas_join, by = c("region_name" = "RAW")) %>%
+  mutate(area_name = strsplit(str_to_upper(CORRECTED), "-")) %>%
+  unnest(area_name) %>%
+  left_join(areas_map@data, by = "area_name") %>%
+  select(region_name, region_id, area_name, area_id, date, day_type,
+         month, speed_min)
+traffic_areas$area_name <- as.factor(traffic_areas$area_name)
+
+# Pre-processing: Filter traffic data to valid observations for modeling
+traffic_filt <-
+  traffic %>%
+  group_by(region_id, time) %>%
+  summarize(count = n()) %>%
+  filter(count == 1) %>%
+  mutate(valid = TRUE) %>%
+  select(-count)
+traffic_model <-
+  traffic %>%
+  left_join(traffic_filt, by = c("region_id", "time")) %>%
+  filter(valid == TRUE) %>%
+  mutate(region_id = as.factor(region_id)) %>%
+  mutate(hour = as.numeric(hour)) %>%
+  select(region_name, region_id, time, hour, date, day_type, month, speed) 
+
+# Pre-processing: Merge all pre-processed datasets
+transit <-
+  traffic_areas %>%
+  left_join(weather, by = "date") %>%
+  left_join(l_rides, by = c("area_name", "area_id", "date", "day_type")) %>%
+  left_join(bus_rides, by = c("area_name", "area_id", "date", "day_type")) %>%
+  left_join(taxi_dropoffs, by = c("area_name", "area_id", "date")) %>%
+  left_join(taxi_pickups, by = c("area_name", "area_id", "date")) %>%
+  select(-longitude.x, -latitude.x, -longitude.y, -latitude.y)
+transit$taxi_total_dropoffs[is.na(transit$taxi_total_dropoffs)] <- 0
+transit$taxi_norm_dropoffs[is.na(transit$taxi_norm_dropoffs)] <- 0
+transit$taxi_avg_ride_len[is.na(transit$taxi_avg_ride_len)] <- 0
+transit$taxi_total_pickups[is.na(transit$taxi_total_pickups)] <- 0
+transit$taxi_norm_pickups[is.na(transit$taxi_norm_pickups)] <- 0
+```
+
+\newpage
+```{r eval=FALSE}
+# Modeling
+set.seed(101) 
+inTrain = createDataPartition(traffic_model$speed, 1, 0.8, FALSE)
+traffic_train = traffic_model[inTrain, ]
+traffic_test = traffic_model[-inTrain, ]
+traffic_valid = read.csv("validation.csv", sep = ",", header = TRUE)
+model_slr <- lm(speed ~ region_id + hour + day_type, traffic_train)
+model_slr_int <- lm(speed ~ region_id * hour * day_type, traffic_train) 
+trCtrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+model_knn <- train(speed ~ region_id + hour + day_type, traffic_train,
+                   method = "knn",
+                   trControl = trCtrl,
+                   preProcess = c("center", "scale"),
+                   tuneLength = 10
+)
+traffic_train$modeled_slr <- predict(model_slr)
+traffic_train$modeled_slr_int <- predict(model_slr_int)
+traffic_train$modeled_knn <- predict(model_knn)
+traffic_test$pred_slr <- predict(model_slr, newdata = traffic_test)
+traffic_test$pred_slr_int <- predict(model_slr_int, newdata = traffic_test)
+traffic_test$pred_knn <- predict(model_knn, newdata = traffic_test)
+traffic_valid$pred_slr <- predict(model_slr, newdata = traffic_valid)
+traffic_valid$pred_slr_int <- predict(model_slr_int, newdata = traffic_valid)
+traffic_valid$pred_knn <- predict(model_knn, newdata = traffic_valid)
+
+# Identify top 10 areas for each response
+l_total_top10 <-
+  unique(rbind(head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(l_total_rides)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit,area_name, area_id, day_type),
+                              mean = mean(l_total_rides)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(l_total_rides)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(desc(mean)), 10))$area_name)
+l_norm_top10 <-
+  unique(rbind(head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(l_norm_rides)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit,area_name, area_id, day_type),
+                              mean = mean(l_norm_rides)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(l_norm_rides)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(desc(mean)), 10))$area_name)
+```
+
+\newpage
+```{r eval=FALSE}
+bus_total_top10 <-
+  unique(rbind(head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(bus_total_rides)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit,area_name, area_id, day_type),
+                              mean = mean(bus_total_rides)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(bus_total_rides)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(desc(mean)), 10))$area_name)
+bus_norm_top10 <-
+  unique(rbind(head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(bus_norm_rides)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit,area_name, area_id, day_type),
+                              mean = mean(bus_norm_rides)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(bus_norm_rides)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(desc(mean)), 10))$area_name)
+taxi_norm_dropoffs_top10 <-
+  unique(rbind(head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(taxi_norm_dropoffs)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit,area_name, area_id, day_type),
+                              mean = mean(taxi_norm_dropoffs)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(taxi_norm_dropoffs)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(desc(mean)), 10))$area_name)
+taxi_norm_pickups_top10 <-
+  unique(rbind(head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(taxi_norm_pickups)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit,area_name, area_id, day_type),
+                              mean = mean(taxi_norm_pickups)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(taxi_norm_pickups)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(desc(mean)), 10))$area_name)
+```
+
+\newpage
+```{r eval=FALSE}
+taxi_avg_ride_len_top10 <-
+  unique(rbind(head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(taxi_avg_ride_len)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit,area_name, area_id, day_type),
+                              mean = mean(taxi_avg_ride_len)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(desc(mean)), 10),
+               head(summarize(group_by(transit, area_name, area_id, day_type),
+                              mean = mean(taxi_avg_ride_len)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(desc(mean)), 10))$area_name)
+traffic_speed_top10 <-
+  unique(rbind(head(summarize(group_by(traffic_agg, region_name, region_id, day_type),
+                              mean = mean(speed_min)) %>%
+                      filter(day_type == "A") %>%
+                      arrange(mean), 10),
+               head(summarize(group_by(traffic_agg, region_name, region_id, day_type),
+                              mean = mean(speed_min)) %>%
+                      filter(day_type == "W") %>%
+                      arrange(mean), 10),
+               head(summarize(group_by(traffic_agg, region_name, region_id, day_type),
+                              mean = mean(speed_min)) %>%
+                      filter(day_type == "U") %>%
+                      arrange(mean), 10))$region_name)
+l_norm_top10 <- as.character(l_norm_top10)[!as.character(l_norm_top10) %in%
+                                             c("DOUGLAS", "WASHINGTON PARK")]
+l_total_top10 <- as.character(l_total_top10)
+bus_norm_top10 <- as.character(bus_norm_top10)
+bus_total_top10 <- as.character(bus_total_top10)
+taxi_norm_dropoffs_top10 <- as.character(taxi_norm_dropoffs_top10)
+taxi_norm_pickups_top10 <- as.character(taxi_norm_pickups_top10)
+taxi_avg_ride_len_top10 <- as.character(taxi_avg_ride_len_top10)
+traffic_speed_top10 <- as.character(traffic_speed_top10)
+
+# Environment cleanup
+rm(weather, i, l_stops, l_rides, bus_stops, bus_rides, taxi_dropoffs,
+   taxi_pickups, day_type_ref, traffic, traffic_areas_join, traffic_filt,
+   traffic_areas, inTrain)
+save.image("chicago-traffic-transit.RData")
+```
