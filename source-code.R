@@ -11,7 +11,7 @@ setwd("~/Downloads")
 # Pre-processing: Community areas
 areas_map <-
   readOGR(paste0("Boundaries - Community Areas (current)/",
-                 "geo_export_068a54b3-748c-4231-bc70-c54dab4b567e.shp"))
+                 "geo_export_be9b4509-e7c5-44d6-84be-fe14ef760765.shp"))
 areas_map@data <-
   areas_map@data %>%
   rename(area_name = community,
@@ -48,6 +48,7 @@ traffic_map_ggplot <- fortify(traffic_map, region = "region_id")
 # Pre-processing: Weather
 weather <-
   read.csv("weather.csv", sep = ",", header = TRUE) %>%
+  filter(STATION == "USW00014819") %>%
   select(DATE, PRCP, TMIN, TMAX) %>%
   rename(date = DATE, prcp = PRCP, tmin = TMIN, tmax = TMAX)
 weather$date <- as.Date(weather$date, "%Y-%m-%d")
@@ -135,7 +136,7 @@ day_type_ref <-
 # Pre-processing: Bus station map
 bus_map <-
   readOGR(paste0("CTA Bus Stops/",
-                 "geo_export_5a152383-5d3d-4786-a4fd-554102086fc5.shp"))
+                 "geo_export_d8eece1f-6b8f-4ec9-9830-7f58115897aa.shp"))
 bus_map@data$area_name <- over(bus_map, areas_map)$area_name
 bus_map@data$area_id <- over(bus_map, areas_map)$area_id
 bus_stops <-
@@ -185,7 +186,7 @@ bus_rides <-
             by = c("area_id" = "id")) 
 
 # Pre-processing: Taxi dropoffs
-taxi_dropoffs <- read.csv("taxi.csv", sep = ",", header = TRUE) %>%
+taxi_dropoffs <- read.csv("taxi-dropoffs.csv", sep = ",", header = TRUE) %>%
   rename(area_id = Dropoff.Community.Area,
          date = Ride.Date,
          taxi_avg_ride_len = Average.Ride.Length,
@@ -199,7 +200,7 @@ taxi_dropoffs <- read.csv("taxi.csv", sep = ",", header = TRUE) %>%
 
 # Pre-processing: Taxi pickups
 taxi_pickups <-
-  read.csv("total-ride-numbers-new.csv", sep = ",", header = TRUE) %>%
+  read.csv("total-pickups.csv", sep = ",", header = TRUE) %>%
   rename(area_id = Pickup.Community.Area,
          date = Ride.Date,
          taxi_total_pickups = Total.Ride.Numbers) %>%
@@ -211,6 +212,11 @@ taxi_pickups <-
 
 # Pre-processing: Traffic congestion
 traffic_areas_join <- read.csv("key-traffic-join.csv", sep = ",", header = TRUE)
+if(!("Chicago_Traffic_Tracker_-_Historical_Congestion_Estimates_by_Region.csv"
+     %in% dir())) {
+  unzip(paste0("Chicago_Traffic_Tracker_-_Historical_Congestion_Estimates_by_",
+               "Region.csv.zip"))
+}
 traffic <-
   read.csv(paste0("Chicago_Traffic_Tracker_-_Historical_Congestion",
                   "_Estimates_by_Region.csv"),
