@@ -1,17 +1,17 @@
 library(caret)
 library(maptools)
 library(reshape2)
+library(rgdal)
 library(rgeos)
 library(sp)
-library(rgdal)
 library(tidyverse)
 
-setwd("~/Downloads")
 
 # Pre-processing: Community areas
 areas_map <-
   readOGR(paste0("Boundaries - Community Areas (current)/",
-                 "geo_export_be9b4509-e7c5-44d6-84be-fe14ef760765.shp"))
+                 str_subset(dir("Boundaries - Community Areas (current)"),
+                            "shp$")))
 areas_map@data <-
   areas_map@data %>%
   rename(area_name = community,
@@ -21,7 +21,7 @@ areas_map_ggplot <- fortify(areas_map, region = "area_id")
 # Pre-processing: Traffic region map
 traffic_map <-
   read.csv("Chicago_Traffic_Tracker_-_Congestion_Estimates_by_Regions.csv",
-           sep = ",", header = TRUE)
+           header = TRUE)
 for(i in 1:29){
   traffic_map$polygonMatrix[i] <-
     list(Polygons(list(Polygon(matrix(c(traffic_map$WEST[i],
@@ -47,7 +47,7 @@ traffic_map_ggplot <- fortify(traffic_map, region = "region_id")
 
 # Pre-processing: Weather
 weather <-
-  read.csv("weather.csv", sep = ",", header = TRUE) %>%
+  read.csv("weather.csv", header = TRUE) %>%
   filter(STATION == "USW00014819") %>%
   select(DATE, PRCP, TMIN, TMAX) %>%
   rename(date = DATE, prcp = PRCP, tmin = TMIN, tmax = TMAX)
@@ -55,7 +55,7 @@ weather$date <- as.Date(weather$date, "%Y-%m-%d")
 
 # Pre-processing: Census
 census <-
-  read.csv("ReferenceCCA20112015.csv", sep = ",", header = TRUE) %>%
+  read.csv("ReferenceCCA20112015.csv", header = TRUE) %>%
   mutate(area_name = str_to_upper(GEOG)) %>%
   mutate(area_name = ifelse(area_name == "THE LOOP", "LOOP", area_name)) %>%
   mutate(area_name = ifelse(area_name == "O'HARE", "OHARE", area_name)) %>%
@@ -92,7 +92,7 @@ census_plot <- melt(census, id.vars = c("area_name", "area_id", "pop2010",
 # Pre-processing: 'L' station map
 l_map <-
   read.csv("CTA_-_System_Information_-_List_of__L__Stops_-_Map.csv",
-           sep = ",", header = TRUE) %>%
+           header = TRUE) %>%
   mutate(x = as.numeric(str_remove(sapply(str_split(Location, ", "),
                                           "[", 1), "\\("))) %>%
   mutate(y = as.numeric(str_remove(sapply(str_split(Location, ", "),
@@ -110,7 +110,7 @@ l_stops <- l_map@data %>%
 # Pre-processing: 'L' ridership
 l_rides <-
   read.csv("CTA_-_Ridership_-__L__Station_Entries_-_Daily_Totals.csv",
-           sep = ",", header = TRUE) %>%
+           header = TRUE) %>%
   mutate(date = as.Date(date, "%m/%d/%Y")) %>%
   rename(day_type = daytype) %>%
   filter(rides > 0) %>%
@@ -135,8 +135,7 @@ day_type_ref <-
 
 # Pre-processing: Bus station map
 bus_map <-
-  readOGR(paste0("CTA Bus Stops/",
-                 "geo_export_d8eece1f-6b8f-4ec9-9830-7f58115897aa.shp"))
+  readOGR(paste0("CTA Bus Stops/", str_subset(dir("CTA Bus Stops"), "shp$")))
 bus_map@data$area_name <- over(bus_map, areas_map)$area_name
 bus_map@data$area_id <- over(bus_map, areas_map)$area_id
 bus_stops <-
@@ -158,7 +157,7 @@ bus_stops <-
 # Pre-processing: Bus ridership
 bus_rides <-
   read.csv("CTA_-_Ridership_-_Bus_Routes_-_Daily_Totals_by_Route.csv",
-           sep = ",", header = TRUE) %>%
+           header = TRUE) %>%
   mutate(date = as.Date(date, "%m/%d/%Y")) %>%
   rename(day_type = daytype) %>%
   # Filter out routes that do not exist at present or that started after 2010
@@ -186,7 +185,7 @@ bus_rides <-
             by = c("area_id" = "id")) 
 
 # Pre-processing: Taxi dropoffs
-taxi_dropoffs <- read.csv("taxi-dropoffs.csv", sep = ",", header = TRUE) %>%
+taxi_dropoffs <- read.csv("taxi-dropoffs.csv", header = TRUE) %>%
   rename(area_id = Dropoff.Community.Area,
          date = Ride.Date,
          taxi_avg_ride_len = Average.Ride.Length,
@@ -200,10 +199,10 @@ taxi_dropoffs <- read.csv("taxi-dropoffs.csv", sep = ",", header = TRUE) %>%
 
 # Pre-processing: Taxi pickups
 taxi_pickups <-
-  read.csv("total-pickups.csv", sep = ",", header = TRUE) %>%
+  read.csv("taxi-pickups.csv", header = TRUE) %>%
   rename(area_id = Pickup.Community.Area,
          date = Ride.Date,
-         taxi_total_pickups = Total.Ride.Numbers) %>%
+         taxi_total_pickups = Total.Number.of.Rides) %>%
   mutate(area_id = as.factor(area_id)) %>%
   mutate(date = as.Date(date, "%Y-%m-%d")) %>%
   left_join(census, by = "area_id") %>%
@@ -211,7 +210,7 @@ taxi_pickups <-
   select(area_name, area_id, date, taxi_total_pickups, taxi_norm_pickups)
 
 # Pre-processing: Traffic congestion
-traffic_areas_join <- read.csv("key-traffic-join.csv", sep = ",", header = TRUE)
+traffic_areas_join <- read.csv("key-traffic-join.csv", header = TRUE)
 if(!("Chicago_Traffic_Tracker_-_Historical_Congestion_Estimates_by_Region.csv"
      %in% dir())) {
   unzip(paste0("Chicago_Traffic_Tracker_-_Historical_Congestion_Estimates_by_",
@@ -219,8 +218,7 @@ if(!("Chicago_Traffic_Tracker_-_Historical_Congestion_Estimates_by_Region.csv"
 }
 traffic <-
   read.csv(paste0("Chicago_Traffic_Tracker_-_Historical_Congestion",
-                  "_Estimates_by_Region.csv"),
-           sep = ",", header = TRUE) %>%
+                  "_Estimates_by_Region.csv"), header = TRUE) %>%
   mutate(time = as.POSIXct(strptime(TIME, "%m/%d/%Y %I:%M:%S %p"))) %>%
   mutate(date = as.Date(time)) %>%
   mutate(month = format(date, "%m")) %>%
@@ -229,7 +227,7 @@ traffic <-
          region_id = REGION_ID) %>%
   left_join(day_type_ref, by = "date") %>%
   left_join(traffic_map@data, by = "region_id") %>%
-  filter(BUS.COUNT >= 5, NUMBER.OF.READS >= 30)
+  filter(BUS.COUNT >= 5, NUMBER.OF.READS >= 30, !is.na(daytype))
 
 # Pre-processing: Aggregate traffic data to peak congestion per day
 traffic_agg <-
@@ -260,6 +258,7 @@ traffic_model <-
   filter(valid == TRUE) %>%
   mutate(region_id = as.factor(region_id)) %>%
   mutate(hour = as.numeric(hour)) %>%
+  filter(time < "2015-02-01 00:00:00") %>%
   select(region_name, region_id, time, hour, date, day_type, month, speed) 
 
 # Pre-processing: Merge all pre-processed datasets
@@ -282,7 +281,14 @@ set.seed(101)
 inTrain = createDataPartition(traffic_model$speed, 1, 0.8, FALSE)
 traffic_train = traffic_model[inTrain, ]
 traffic_test = traffic_model[-inTrain, ]
-traffic_valid = read.csv("validation.csv", sep = ",", header = TRUE)
+traffic_valid = read.csv("validation.csv", header = TRUE) %>%
+  mutate(time = as.POSIXct(strptime(last_updated, "%Y-%m-%d %H:%M:%S"))) %>%
+  mutate(hour = as.numeric(format(time, "%H"))) %>%
+  mutate(region_id = as.factor(region_id)) %>%
+  mutate(day_type = ifelse(format(time, "%u") < 6, "W",
+                          ifelse(format(time, "%u") == 6, "A", "U"))) %>%
+  rename(speed = current_speed) %>%
+  select(-last_updated)
 model_slr <- lm(speed ~ region_id + hour + day_type, traffic_train)
 model_slr_int <- lm(speed ~ region_id * hour * day_type, traffic_train) 
 trCtrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
