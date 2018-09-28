@@ -24,7 +24,7 @@ public class Main {
 		HashMap<String, HashMap<String, Integer>> dropoffNumRides = new HashMap<String, HashMap<String, Integer>>();
 
 		try {
-			inputStream = new FileInputStream("Taxi_Trips.csv");
+			inputStream = new FileInputStream("Source Data/Taxi_Trips.csv");
 			sc = new Scanner(inputStream, "UTF-8");
 
 			//String header =
@@ -94,7 +94,7 @@ public class Main {
 		}
 		System.out.println("Reading complete!");
 
-		PrintWriter pw1 = new PrintWriter(new File("taxi-pickups.csv"));
+		PrintWriter pw1 = new PrintWriter(new File("Source Data/taxi-pickups.csv"));
 
 		for(String pickupCommArea : pickupNumRides.keySet()) {
 			HashMap<String, Integer> commHolder = pickupNumRides.get(pickupCommArea);
@@ -105,7 +105,7 @@ public class Main {
 		pw1.close();
 		System.out.println("Writing of file 1 complete!");
 
-		PrintWriter pw2 = new PrintWriter(new File("taxi-dropoffs.csv"));
+		PrintWriter pw2 = new PrintWriter(new File("Source Data/taxi-dropoffs.csv"));
 		for(String dropoffCommArea : dropoffNumRides.keySet()) {
 			HashMap<String, Integer> numHolder = dropoffNumRides.get(dropoffCommArea);
 			HashMap<String, Double> distHolder = dropoffTotalDistance.get(dropoffCommArea);
