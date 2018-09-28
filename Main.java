@@ -1,3 +1,5 @@
+// Author: Christopher Ver Hoef
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -22,7 +24,7 @@ public class Main {
 		HashMap<String, HashMap<String, Integer>> dropoffNumRides = new HashMap<String, HashMap<String, Integer>>();
 
 		try {
-			inputStream = new FileInputStream("/home/hile/Documents/CSP571/chicago-traffic-transit/Taxi_Trips.csv");
+			inputStream = new FileInputStream("Taxi_Trips.csv");
 			sc = new Scanner(inputStream, "UTF-8");
 
 			//String header =
@@ -41,7 +43,7 @@ public class Main {
 				linesRead += 1;
 				if(linesRead%100000 == 0)
 					System.out.println(linesRead + " lines read");
-				
+
 				String line = sc.nextLine();
 				String[] lineArr = line.split(",");
 				if(lineArr[5].equals(""))
@@ -50,14 +52,14 @@ public class Main {
 				String pickupCommArea = lineArr[8];
 				String dropoffCommArea = lineArr[9];
 				String date = lineArr[2].substring(0, 10);
-				
+
 				if(pickupCommArea.equals("") || tripLen == 0 || dropoffCommArea.equals(""))
 					continue;
-				
+
 				if(!pickupNumRides.containsKey(pickupCommArea))
 					pickupNumRides.put(pickupCommArea, new HashMap<String, Integer>());
 				HashMap<String, Integer> pickupCommHolder = pickupNumRides.get(pickupCommArea);
-					
+
 				int pickupCount = pickupCommHolder.containsKey(date) ? pickupCommHolder.get(date) : 0;
 				pickupCommHolder.put(date, pickupCount+1);
 
@@ -68,13 +70,13 @@ public class Main {
 				}
 				HashMap<String, Double> distanceHolder = dropoffTotalDistance.get(dropoffCommArea);
 				HashMap<String, Integer> numHolder = dropoffNumRides.get(dropoffCommArea);
-					
+
 				double currentDist = distanceHolder.containsKey(date) ? distanceHolder.get(date) : 0;
 				distanceHolder.put(date, currentDist+tripLen);
-					
+
 				int dropoffCount = numHolder.containsKey(date) ? numHolder.get(date) : 0;
 				numHolder.put(date, dropoffCount+1);
-				
+
 				//if(linesRead == 1000000)
 				//	break;
 			}
@@ -91,19 +93,19 @@ public class Main {
 			}
 		}
 		System.out.println("Reading complete!");
-		
-		PrintWriter pw1 = new PrintWriter(new File("/home/hile/Documents/CSP571/chicago-traffic-transit/taxi-pickups.csv"));
-		
+
+		PrintWriter pw1 = new PrintWriter(new File("taxi-pickups.csv"));
+
 		for(String pickupCommArea : pickupNumRides.keySet()) {
 			HashMap<String, Integer> commHolder = pickupNumRides.get(pickupCommArea);
 			for(String date : commHolder.keySet()) {
 				pw1.write(pickupCommArea+","+date+","+commHolder.get(date)+"\n");
 			}
-		}		
+		}
 		pw1.close();
 		System.out.println("Writing of file 1 complete!");
-		
-		PrintWriter pw2 = new PrintWriter(new File("/home/hile/Documents/CSP571/chicago-traffic-transit/taxi-dropoffs.csv"));
+
+		PrintWriter pw2 = new PrintWriter(new File("taxi-dropoffs.csv"));
 		for(String dropoffCommArea : dropoffNumRides.keySet()) {
 			HashMap<String, Integer> numHolder = dropoffNumRides.get(dropoffCommArea);
 			HashMap<String, Double> distHolder = dropoffTotalDistance.get(dropoffCommArea);
@@ -111,11 +113,11 @@ public class Main {
 				double avgDist = distHolder.get(date)/numHolder.get(date);
 				pw2.write(dropoffCommArea+","+date+","+numHolder.get(date)+","+avgDist+"\n");
 			}
-		}		
+		}
 		pw2.close();
-		
+
 		System.out.println("Writing of file 2 complete!");
-		
+
 		long endTime = System.nanoTime();
 		System.out.println((endTime - startTime)/1000000000/60 + " minutes (about); total");
 	}
